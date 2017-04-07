@@ -48,9 +48,19 @@
 #define PUBLIC_CMD_STR	"Public: OPTIONS, DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE, GET_PARAMETER"
 #define ALLOW_CMD_STR	"Allow: OPTIONS, DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE, GET_PARAMETER"
 
-
 /**************************************STRUCTURES********************************************************/
 
+struct rtsp_session
+{
+	u32 session_id;
+	u32 session_timeout;
+	u8 *user;
+	u8 *name;
+	u8 *info;
+	u32 version;
+	u64 start_time;
+	u64 end_time;
+};
 
 /* rtsp transport header field struct */
 struct rtsp_transport
@@ -78,9 +88,6 @@ struct rtsp_message{
 	u32 CSeq;
 	u32 bandwidth; //measured in bits per sec
 	u32 content_length; //must be set if any content
-	u32 session_id;
-	u32 session_timeout;
-	//u32 time_stamp; // "Timestamp:[digit][.delay]"
 	struct rtsp_transport transport;
 };
 
