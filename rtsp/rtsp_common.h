@@ -53,7 +53,7 @@
 
 /**************************************STRUCTURES********************************************************/
 
-struct rtsp_session
+struct rtsp_session_info
 {
 	u32 session_id;
 	u32 session_timeout;

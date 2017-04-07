@@ -4,6 +4,8 @@
 /*****************************************************INCLUDE**************************************************/
 #include "rtp_common.h"
 #include "rtsp_common.h"
+#include "rtp_sink.h"
+#include "rtp_source.h"
 
 /*****************************************************DEFINITIONS**********************************************/
 
@@ -11,9 +13,11 @@
 #ifndef CRLF
 #define CRLF	"\r\n"
 #endif
-#ifndef IS_LINE_END
-#define IS_LINE_END(x) (return *(x)=='\r' || *(x)=='\0')	
-#endif
+
+inline int is_line_end(u8 *x)
+{
+    return (*x=='\r' || *x=='\0');
+}
 
 #define RTSP_PORT_DEF 554
 #define RTSP_SELECT_SOCK 8
@@ -36,16 +40,22 @@ enum _rtsp_state {
 };
 typedef enum _rtsp_state rtsp_state;
 
+typedef struct _rtsp_client_connection_session{
+	int client_socket;
+	u8 *client_ip;
+	struct rtsp_transport transport;
+	u8 is_handled;
+}rtsp_cc_session, *p_rtsp_cc_session;
+
 typedef struct _rtsp_server_media_subsession{
 	u32 id;
 	void *parent_session;
 	_list media_anchor;
-	struct rtp_source *src;
-	struct rtp_sink *sink;
+	rtp_source_t *src;
+	rtp_sink_t *sink;
 	rtsp_cc_session client;
 	TaskHandle_t task_id;
-	void (*stream_task_handle)(void *ctx); //we register rtp task here
-	int (*media_handle)(void *ctx); //we register media handler here
+	void (*rtp_task_handle)(void *ctx); //we register rtp task here
 	u8* my_sdp;
 	int my_sdp_max_len;
 	int my_sdp_content_len;	
@@ -60,23 +70,16 @@ typedef struct _rtsp_server_media_session{
 	int max_subsession_nb;
 	u32 subsession_cnt;
 	u32 reference_cnt;
-	struct rtsp_session session;
+	struct rtsp_session_info session_info;
 	//u32 time_stamp; // "Timestamp:[digit][.delay]"	
 }rtsp_sm_session, *p_rtsp_sm_session;
-
-typedef struct _rtsp_client_connection_session{
-	int client_socket;
-	u8 *client_ip;
-	struct rtsp_transport transport;
-	u8 is_handled;
-}rtsp_cc_session, *p_rtsp_cc_session;
 
 typedef struct _rtsp_client_media_subsession{
 	u32 id;
 	void *parent_session;
 	_list media_anchor;
-	struct rtp_source *src;
-	struct rtp_sink *sink;	
+	rtp_source_t *src;
+	rtp_sink_t *sink;	
 }rtsp_cm_subsession, *p_rtsp_cm_subsession;
 
 typedef struct _rtsp_client_media_session{
@@ -86,16 +89,16 @@ typedef struct _rtsp_client_media_session{
 }rtsp_cm_session, *p_rtsp_cm_session;
 
 //struct to store basic configuration for create rtsp server
-typedef struct _rtsp_adapter
+typedef struct _rtsp_server_adapter
 {
 	int max_subsession_nb;
 	void *ext_adapter;
-}rtsp_adapter;
+}rtsp_server_adapter;
 
 struct rtsp_server{
 	TaskHandle_t rtsp_task_id;
 	void (*launch_handle)(void *ctx);
-	void *ext_adapter; //pointer to external adapter
+	rtsp_server_adapter *adapter;
 	u8 is_setup;
 	u8 is_launched;
 	u8 server_url[MAX_URL_LEN];
@@ -108,10 +111,7 @@ struct rtsp_server{
 	u32 CSeq_now;
 	rtsp_state state_now;
 	rtsp_sm_session server_media;
-	//rtsp_cc_session client_connection;
 };
-
-
 
 extern int rtsp_req_OPTIONS_cb(void *ext_adapter);
 extern int rtsp_req_DESCRIBE_cb(void *ext_adapter);
@@ -122,21 +122,28 @@ extern int rtsp_req_TEARDOWN_cb(void *ext_adapter);
 extern int rtsp_req_PAUSE_cb(void *ext_adapter);
 extern int rtsp_req_UNDEFINED_cb(void *ext_adapter);
 
-int rtsp_on_recv_OPTIONS();
-int rtsp_on_recv_DESCRIBE();
-int rtsp_on_recv_SETUP();
-int rtsp_on_recv_PLAY();
-int rtsp_on_recv_TEARDOWN();
-int rtsp_on_recv_PAUSE();
-int rtsp_on_recv_GET_PARAMETER();
-int rtsp_on_recv_UNSUPPORTED();
+int rtsp_on_req_OPTIONS(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter));
+int rtsp_on_req_DESCRIBE(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter));
+int rtsp_on_req_GET_PARAMETER(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter));
+int rtsp_on_req_SETUP(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter));
+int rtsp_on_req_PLAY(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter));
+int rtsp_on_req_TEARDOWN(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter));
+int rtsp_on_req_PAUSE(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter));
+int rtsp_on_req_UNDEFINED(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter));
 
-int rtsp_server_media_subsession_add(rtsp_sm_session *session, rtsp_sm_subsession *subsession);
-rtsp_sm_subsession * rtsp_sm_subsession_create(struct rtp_source *src, struct rtp_sink *sink, int max_sdp_size);
-struct rtsp_server *rtsp_server_create(int max_subsession_nb);
+
+int rtsp_parse_request(struct rtsp_message *msg, u8 *request, int size);
+void rtsp_sm_subsession_free(rtsp_sm_subsession *subsession);
+void rtsp_sm_session_free(rtsp_sm_session *session);
+int rtsp_sm_subsession_add(rtsp_sm_session *session, rtsp_sm_subsession *subsession);
+rtsp_sm_subsession *rtsp_sm_subsession_create(rtp_source_t *src, rtp_sink_t *sink, int max_sdp_size);
+void rtsp_sm_clear_session(rtsp_sm_session *session);
+void rtsp_sm_clear_all(rtsp_sm_session *session);
+int rtsp_sm_setup(rtsp_sm_session *session, void *parent, int max_subsession_nb, int max_sdp_size);
+struct rtsp_server *rtsp_server_create(rtsp_server_adapter *adapter);
+void rtsp_server_free(struct rtsp_server *server);
+void rtsp_server_stop(struct rtsp_server *server);
 int rtsp_server_setup(struct rtsp_server *server, const u8* server_url, int port);
 int rtsp_server_launch(struct rtsp_server *server);
-void rtsp_server_destroy(struct rtsp_server *server);
-
 
 #endif

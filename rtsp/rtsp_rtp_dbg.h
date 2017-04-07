@@ -5,6 +5,11 @@
 #include "platform/platform_stdlib.h"
 
 /* error code */
+#define EPERM	1
+#define EIO		5
+#define EAGAIN	11
+#define ENOMEM	12
+#define EINVAL	22 
 
 #define DEBUG_LEVEL_0   0
 #define DEBUG_LEVEL_1	1

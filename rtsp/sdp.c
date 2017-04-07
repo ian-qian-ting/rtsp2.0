@@ -106,17 +106,3 @@ void sdp_fill_a_string(unsigned char *sdp_buf, int size, u8 *string)
 		            , string);
 		sdp_strcat(sdp_buf, size, line);        					
 }
-
-void sdp_fill_a_rtpmap(unsigned char *sdp_buf, int size, struct codec_info *codec)
-{
-        unsigned char line[SDP_LINE_LEN] = {0};
-		if(codec->audio_channels <= 1)
-		{
-                                sprintf(line, "a=rtpmap:%d %s/%d" CRLF \
-			            , codec->pt, codec->codec_name, codec->clock_rate);        
-		}else{
-				sprintf(line, "a=rtpmap:%d %s/%d/%d" CRLF \
-							, codec->pt, codec->codec_name, codec->clock_rate, codec->audio_channels);		
-			}
-		sdp_strcat(sdp_buf, size, line);
-}
