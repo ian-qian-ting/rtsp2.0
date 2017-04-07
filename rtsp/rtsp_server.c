@@ -257,6 +257,19 @@ static u8* rtsp_parse_body_line(struct rtsp_message *msg, u8 *body, int *size_le
 								if(token != NULL)
 									msg->transport.client_port_odd = atoi(token);
 							}
+							else if(!strncmp(b_tmp, "port", 4))
+							{
+								memset(b_tmp, 0, 64);
+								memcpy(b_tmp, p_tmp, p_end - p_tmp);
+								b_tmp[p_end - p_tmp] = '\0';	
+								token = strtok(b_tmp, delimeter); //get "client_port"
+								token = strtok(NULL, delimeter);
+								if(token != NULL)
+									msg->transport.port_even = atoi(token);
+								token = strtok(NULL, delimeter);
+								if(token != NULL)
+									msg->transport.port_odd = atoi(token);								
+							}
 							else if(!strncmp(b_tmp, "server_port", 11))
 							{
 								memset(b_tmp, 0, 64);
@@ -339,6 +352,11 @@ static u8* rtsp_parse_body_line(struct rtsp_message *msg, u8 *body, int *size_le
 					}
 					if(msg->transport.ttl == 0 || msg->transport.ttl >256)
 						msg->transport.ttl = 1;
+				}else if(msg->transport.ssrc == 0)
+				{
+					rtw_get_random_bytes(&msg->transport.ssrc, sizeof(msg->transport.ssrc));
+					if(msg->transport.ssrc < 0x10000000)
+						msg->transport.ssrc += 0x10000000;
 				}
 				
 			}else{
@@ -387,7 +405,15 @@ int rtsp_parse_request(struct rtsp_message *msg, u8 *request, int size)
 
 /* rtsp server media session */
 
-rtsp_sm_subsession * rtsp_server_media_subsession_create(struct rtp_source *src, struct rtp_sink *sink, int max_sdp_size)
+void rtsp_sm_subsession_free(rtsp_sm_subsession *subsession)
+{
+		if(subsession->my_sdp != NULL)
+			free(subsession->my_sdp);
+		if(subsession != NULL)
+			free(subsession);
+}
+
+rtsp_sm_subsession * rtsp_sm_subsession_create(struct rtp_source *src, struct rtp_sink *sink, int max_sdp_size)
 {
 		rtsp_sm_subsession *subsession = malloc(sizeof(rtsp_sm_subsession));
 		if(subsession == NULL)
@@ -402,6 +428,8 @@ rtsp_sm_subsession * rtsp_server_media_subsession_create(struct rtp_source *src,
 			free(subsession);
 			return NULL;
 		}
+		subsession->my_sdp_max_len = max_sdp_size;
+		subsession->my_sdp_content_len = 0;
 		INIT_LIST_HEAD(&subsession->media_anchor);
 		if(sink != NULL)
 			subsession->sink = sink;
@@ -410,9 +438,9 @@ rtsp_sm_subsession * rtsp_server_media_subsession_create(struct rtp_source *src,
 		return subsession;
 }
 
-int rtsp_server_media_subsession_add(rtsp_sm_session *session, rtsp_sm_subsession *subsession)
+int rtsp_sm_subsession_add(rtsp_sm_session *session, rtsp_sm_subsession *subsession)
 {
-		p_rtsp_sm_subsession tmp = NULL;
+		//p_rtsp_sm_subsession tmp = NULL;
 		//check if server reach maximum subsession number
 		if(session->subsession_cnt >= session->max_subsession_nb)
 		{
@@ -426,6 +454,26 @@ int rtsp_server_media_subsession_add(rtsp_sm_session *session, rtsp_sm_subsessio
 		return 0;
 }
 
+void rtsp_server_media_clear_session(rtsp_sm_session *session)
+{
+		INIT_LIST_HEAD(&session->media_entry);
+		session->my_sdp_content_len = 0;
+		session->subsession_cnt = 0;
+		session->reference_cnt = 0;			
+}
+
+void rtsp_server_media_clear_all(rtsp_sm_session *session)
+{
+		if(session->my_sdp != NULL)
+			free(session->my_sdp);
+		session->parent_server = NULL;
+		INIT_LIST_HEAD(&session->media_entry);
+		session->my_sdp_max_len = 0;
+		session->my_sdp_content_len = 0;
+		session->subsession_cnt = 0;
+		session->reference_cnt = 0;		
+}
+
 int rtsp_server_media_setup(rtsp_sm_session *session, void *parent, int max_sdp_size)
 {
 		session->parent_server = parent;
@@ -434,7 +482,9 @@ int rtsp_server_media_setup(rtsp_sm_session *session, void *parent, int max_sdp_
 			RTSP_ERROR("\n\rcreate media sdp buffer failed");
 			return -1;
 		}
+		session->my_sdp_max_len = max_sdp_size;
 		INIT_LIST_HEAD(&session->media_entry);
+		session->my_sdp_content_len = 0;
 		session->subsession_cnt = 0;
 		session->reference_cnt = 0;
 		return 0;
@@ -517,52 +567,242 @@ int rtsp_on_req_OPTIONS(struct rtsp_server *server, void *cb)
 		return 0;
 	server->CSeq_now = server->message.CSeq;
 	if(cb)
-		cb(server->ext_adapter);
+		cb(server);
 	sprintf(response, RTSP_RES_OK CRLF \
 						"CSeq: %d" CRLF \
 						PUBLIC_CMD_STR CRLF \
 						CRLF, server->CSeq_now);
-	return write(server->client_connection.client_socket, response, strlen(response));
+	return write(server->client_socket, response, strlen(response));
+}
+
+static void rtsp_session_set(struct rtsp_session *s, u32 session_id, u32 session_timeout, u8 *user, u8 *name, u8 *info, u32 version, u64 start_time, u64 end_time)
+{
+	if(session_id > 0x10000000)
+		s->session_id = session_id;
+	else 
+	{
+		rtw_get_random_bytes((void *)&s->session_id, sizeof(s->session_id));
+		if(s->session_id < 0x10000000)
+			s->session_id += 0x10000000;
+	}
+	if(session_timeout >= 30000)
+		s->session_timeout = session_timeout;
+	else
+		s->session_timeout = DEF_SESSION_TIMEOUT;
+	if(user != NULL)
+		s->user = user;
+	else
+		s->user = NULL;
+	if(name != NULL)
+		s->name = name;
+	else
+		s->name = NULL;
+	if(info != NULL)
+		s->info = info;
+	else
+		s->info = NULL;
+	s->version = version;
+	s->start_time = start_time;
+	s->end_time = end_time;
+}
+
+static int get_frequency_index(int samplerate)
+{
+	uint32_t freq_idx_map[] = {96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350};
+	for(int i=0;i<sizeof(freq_idx_map)/sizeof(freq_idx_map[0]);i++){
+		if(samplerate==freq_idx_map[i])
+			return i;
+	}
+	return 0xf;		// 15: frequency is written explictly 
+}
+
+void rtsp_create_sdp(struct rtsp_server *server)
+{
+	int i;
+	u8 *unicast_addr, *connection_addr;
+	u8 *sdp_buf = server->server_media.my_sdp;
+	int max_len = server->server_media.my_sdp_max_len;
+	struct rtsp_session *s = &server->server_media.session;
+	u8 nettype[] = "IN";
+	u8 addrtype[] = "IP4";
+	unicast_addr = server->server_ip;
+	connection_addr = server->client_ip;
+	//sdp session level
+	/* fill Protocol Version -- only have Version 0 for now*/	
+	sprintf(sdp_buf, "v=0" CRLF);
+	sdp_fill_o_field(sdp_buf, max_len, s->user, s->session_id, s->version, nettype, addrtype, unicast_addr);
+	sdp_fill_s_field(sdp_buf, max_len, s->name);
+	sdp_fill_c_field(sdp_buf, max_len, nettype, addrtype, connection_addr, server->message.transport.ttl);
+	sdp_fill_t_field(sdp_buf, max_len, rtsp_ctx->session.start_time, rtsp_ctx->session.end_time);	
+	//sdp media level
+	for(i = 0; i < server->server_media.subsession_cnt; i++)
+	{
+		//fill subsession sdp descriptions
+		
+	}
 }
 
 int rtsp_on_req_DESCRIBE(struct rtsp_server *server, void *cb)
 {
 	u8 response[1024] = {0};
+	if(server->state_now != RTSP_INIT)
+	{
+		RTSP_WARN("illogical request!");
+		return -1;
+	}
+	if(cb)
+		cb(server);
+	rtsp_session_set(&server->server_media.session, 0, 0, NULL, NULL, NULL, 0, 0, 0); //use default session settings;
+	//read sdp if any or create general sdp 
+	if(server->server_media.my_sdp == NULL || server->server_media.my_sdp_max_len == 0)
+	{
+		RTSP_ERROR("no sdp buffer allocated!");
+		return -1;
+	}
+	if(server->server_media.my_sdp_content_len == 0 || *server->server_media.my_sdp == '\0')
+		rtsp_create_sdp(server);
 	sprintf(response, RTSP_RES_OK CRLF \
 						"CSeq: %d" CRLF \
 						"Content-Type: application/sdp" CRLF \
-						"Content-Base: rtsp://%d.%d.%d.%d")
-	
+						"Content-Base: rtsp://%d.%d.%d.%d/test.sdp" CRLF \
+						"Content-Length: %d" CRLF \
+						CRLF \
+						"%s", server->CSeq_now, server->server_ip[0], server->server_ip[1], server->server_ip[2], server->server_ip[3], server->server_media.my_sdp_content_len, server->server_media.my_sdp);
+	return write(server->client_socket, response, strlen(response));
 }
 
 int rtsp_on_req_GET_PARAMETER(struct rtsp_server *server, void *cb)
 {
-	
+	u8 response[512] = {0};
+	if(cb)
+		cb(server);	
+	sprintf(response, RTSP_RES_OK CRLF \
+						"CSeq: %d" CRLF \
+						"Session: %x:timeout=%d" CRLF\
+						CRLF, server->CSeq_now, server->server_media.session.session_id, server->server_media.session.session_timeout);
+	return write(server->client_socket, response, strlen(response));							
 }
 
 int rtsp_on_req_SETUP(struct rtsp_server *server, void *cb)
 {
-	
+	u8 response[512] = {0};
+	p_rtsp_sm_subsession subsession = NULL;
+	int iter_cnt = 0;
+	if(server->state_now != RTSP_INIT)
+	{
+		RTSP_WARN("illogical request!");
+		return -1;
+	}
+	//need to clear msg record port after we copy it to respective subsession 
+	list_for_each_entry(subsession, &server->server_media.media_entry, media_anchor, rtsp_sm_subsession)
+	{
+		iter_cnt++;
+		if(!subsession->client.is_handled)
+		{
+			subsession->client.client_socket = server->client_socket;
+			subsession->client.client_ip = server->client_ip;
+			memcpy(&subsession->client.transport, &server->message.transport, sizeof(struct rtsp_transport));
+			subsession->client.is_handled = 1;
+			break;
+		}
+	}
+	if(iter_cnt >= server->server_media.subsession_cnt)
+		server->state_now = RTSP_READY;
+	memset(&server->message.transport, 0, sizeof(struct rtsp_transport));
+	if(cb)
+		cb(server);	
+	if(subsession->client.transport.cast_mode == UNICAST_MODE )
+	{
+		if(subsession->client.transport.lower_proto == TRANS_LOWER_PROTO_UDP)
+		{
+			sprintf(response, RTSP_RES_OK CRLF \
+								"CSeq: %d" CRLF \
+								"Session: %x:timeout=%d" CRLF\	
+								"Transport: RTP/AVP/UDP;%s;client_port=%d-%d;server_port=%d-%d;ssrc=%x;mode=\"PLAY\"" CRLF \
+								CRLF, server->CSeq_now, server->server_media.session.session_id, server->server_media.session.session_timeout, \
+								STR_UNICAST, subsession->client.transport.client_port_even, subsession->client.transport.client_port_odd, \
+								subsession->client.transport.server_port_even, subsession->client.transport.server_port_odd, subsession->client.transport.ssrc);
+		}else if(subsession->client.transport.lower_proto == TRANS_LOWER_PROTO_TCP)
+		{
+			sprintf(response, RTSP_RES_OK CRLF \
+								"CSeq: %d" CRLF \
+								"Session: %x:timeout=%d" CRLF\	
+								"Transport: RTP/AVP/TCP;%s;client_port=%d-%d;server_port=%d-%d;ssrc=%x;mode=\"PLAY\"" CRLF \
+								CRLF, server->CSeq_now, server->server_media.session.session_id, server->server_media.session.session_timeout, \
+								STR_UNICAST, subsession->client.transport.client_port_even, subsession->client.transport.client_port_odd, \
+								subsession->client.transport.server_port_even, subsession->client.transport.server_port_odd, subsession->client.transport.ssrc);			
+		}else{
+			RTSP_ERROR("missing param!");
+			return -1;			
+		}
+	}else if(subsession->client.transport.cast_mode == MULTICAST_MODE)
+	{
+			sprintf(response, RTSP_RES_OK CRLF \
+								"CSeq: %d" CRLF \
+								"Session: %x:timeout=%d" CRLF\	
+								"Transport: RTP/AVP/UDP;%s;port=%d-%d;ttl=%d;ssrc=%x;mode=\"PLAY\"" CRLF \
+								CRLF, server->CSeq_now, server->server_media.session.session_id, server->server_media.session.session_timeout, \
+								STR_MULTICAST, subsession->client.transport.port_even, subsession->client.transport.port_odd, subsession->client.transport.ttl, subsession->client.transport.ssrc);		
+	}else{
+		RTSP_ERROR("missing param!");
+		return -1;		
+	}
+	return write(server->client_socket, response, strlen(response));	
 }
 
 int rtsp_on_req_PLAY(struct rtsp_server *server, void *cb)
 {
-	
+	u8 response[128] = {0};
+	if(server->state_now != RTSP_READY)
+	{
+		RTSP_WARN("illogical request!");
+		return 0;
+	}
+	if(cb)
+		cb(server);	
+	server->state_now = RTSP_PLAYING;
+	//set & start rtp session here
+	sprintf(response, RTSP_RES_OK CRLF \
+						"CSeq: %d" CRLF \
+						"Session: %x" CRLF \
+						CRLF, server->CSeq_now, server->server_media.session.session_id);
+	return write(server->client_socket, response, strlen(response));
 }
 
 int rtsp_on_req_TEARDOWN(struct rtsp_server *server, void *cb)
 {
-	
+	u8 response[128] = {0};
+	if(cb)
+		cb(server);	
+	sprintf(response, RTSP_RES_OK CRLF \
+						"CSeq: %d" CRLF \
+						"Session: %x" CRLF \
+						CRLF, server->CSeq_now, server->server_media.session.session_id);
+	return write(server->client_socket, response, strlen(response));
 }
 
 int rtsp_on_req_PAUSE(struct rtsp_server *server, void *cb)
 {
-	
+	u8 response[128] = {0};
+	if(cb)
+		cb(server);	
+	sprintf(response, RTSP_RES_OK CRLF \
+						"CSeq: %d" CRLF \
+						"Session: %x" CRLF \
+						CRLF, server->CSeq_now, server->server_media.session.session_id);
+	return write(server->client_socket, response, strlen(response));	
 }
 
 int rtsp_on_req_UNDEFINED(struct rtsp_server *server, void *cb)
 {
-	
+	u8 response[128] = {0};
+	if(cb)
+		cb(server);	
+	sprintf(response, RTSP_RES_BAD CRLF \
+						"CSeq: %d" CRLF \
+						"Session: %x" CRLF \
+						CRLF, server->CSeq_now, server->server_media.session.session_id);
+	return write(server->client_socket, response, strlen(response));	
 }
 
 static int rtsp_check_wifi_connectivity(const char *ifname, int *mode)
@@ -581,11 +821,10 @@ static int rtsp_check_wifi_connectivity(const char *ifname, int *mode)
 		return -1;
 }
 
-u8 request_buf[REQUEST_BUF_SIZE];
-//u8 response_buf[RESPONSE_BUF_SIZE];
 void rtsp_server_service(void *ctx)
 {
 		struct rtsp_server *server = (struct rtsp_server *)ctx;
+		u8 request[REQUEST_BUF_SIZE];
 		int opt = 1;
 		int mode = 0;
 		int ret;
@@ -636,11 +875,11 @@ restart:
 			FD_SET(server->server_socket, &server_read_fds);
 			if(select(RTSP_SELECT_SOCK, &server_read_fds, NULL, NULL, &s_listen_timeout))
 			{
-				server->client_connection->client_socket = accept(server->server_socket, (struct sockaddr*)&client_addr, &client_addr_len);
-				if(server->client_connection->client_socket < 0)
+				server->client_socket = accept(server->server_socket, (struct sockaddr*)&client_addr, &client_addr_len);
+				if(server->client_socket < 0)
 				{
 					RTSP_ERROR("\n\rcleint socket error");
-					close(server->client_connection->client_socket);
+					close(server->client_socket);
 					continue;
 				}
 				//load client ip address and port from client_addr
@@ -651,14 +890,14 @@ restart:
 					FD_ZERO(&client_read_fds);
 					c_listen_timeout.tv_sec = 0;
 					c_listen_timeout.tv_usec = 10000;
-					FD_SET(server->client_connection->client_socket, &client_read_fds);
+					FD_SET(server->client_socket, &client_read_fds);
 					
 					if(select(RTSP_SELECT_SOCK, &client_read_fds, NULL, NULL, &c_listen_timeout))
 					{
-						memset(request_buf, 0, REQUEST_BUF_SIZE);
-						ret = read(server->client_connection->client_socket, request_buf, REQUEST_BUF_SIZE);
+						memset(request, 0, REQUEST_BUF_SIZE);
+						ret = read(server->client_socket, request, REQUEST_BUF_SIZE);
 						//check and parse request
-						rtsp_parse_request(&server->message, request_buf, ret);
+						rtsp_parse_request(&server->message, request, ret);
 						switch(server->message.method)
 						{
 							case(RTSP_REQ_OPTIONS):
@@ -686,12 +925,17 @@ restart:
 								ret = rtsp_on_req_UNDEFINED(server, rtsp_req_UNDEFINED_cb);
 								break;
 						}
+						if(ret < 0)
+						{
+								RTSP_ERROR("\n\rrtsp send response failed - err code:%d", ret);
+								goto out;
+						}
 					}
 					if(rtsp_check_wifi_connectivity(WLAN0_NAME, &mode) < 0)
 						goto out;
 				}
 out:			
-				close(server->client_connection.client_socket);	
+				close(server->client_socket);	
 				server->state_now = RTSP_INIT;				
 			}
 			

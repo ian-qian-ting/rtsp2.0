@@ -78,25 +78,6 @@ RTW_PACK_STRUCT_END
 struct rtp_sink;
 struct rtp_source;
 
-struct rtp_trans_stats{
-		
-};
-
-struct rtp_recv_stats{
-
-};
-
-//structure for sending data
-struct rtp_sink{
-
-};
-
-
-//structure for receiving data
-struct rtp_source{
-
-};
-
 /**************************************************DECLARATIONS************************************************/
 
 #endif

@@ -25,6 +25,8 @@
 #define CLIENT_LOWER_PORT_BASE 	51200
 #define SERVER_LOWER_PORT_BASE	51400
 
+#define DEF_SESSION_TIMEOUT	(60000) //in ms
+
 /*****************************************************STRUCTURES***********************************************/
 
 enum _rtsp_state {
@@ -40,24 +42,33 @@ typedef struct _rtsp_server_media_subsession{
 	_list media_anchor;
 	struct rtp_source *src;
 	struct rtp_sink *sink;
+	rtsp_cc_session client;
+	TaskHandle_t task_id;
+	void (*stream_task_handle)(void *ctx); //we register rtp task here
+	int (*media_handle)(void *ctx); //we register media handler here
 	u8* my_sdp;
+	int my_sdp_max_len;
+	int my_sdp_content_len;	
 }rtsp_sm_subsession, *p_rtsp_sm_subsession;
 
 typedef struct _rtsp_server_media_session{
 	_list media_entry;
 	void *parent_server;
 	u8* my_sdp;
+	int my_sdp_max_len;
+	int my_sdp_content_len;
 	int max_subsession_nb;
 	u32 subsession_cnt;
 	u32 reference_cnt;
+	struct rtsp_session session;
+	//u32 time_stamp; // "Timestamp:[digit][.delay]"	
 }rtsp_sm_session, *p_rtsp_sm_session;
 
 typedef struct _rtsp_client_connection_session{
-	TaskHandle_t task_id;
-	void (*session_handle)(void *ctx);
 	int client_socket;
-	u16 client_port;
 	u8 *client_ip;
+	struct rtsp_transport transport;
+	u8 is_handled;
 }rtsp_cc_session, *p_rtsp_cc_session;
 
 typedef struct _rtsp_client_media_subsession{
@@ -91,11 +102,13 @@ struct rtsp_server{
 	int server_socket;
 	u16 server_port;
 	u8 *server_ip;
+	int client_socket;
+	u8 *client_ip;
 	struct rtsp_message message;
 	u32 CSeq_now;
 	rtsp_state state_now;
 	rtsp_sm_session server_media;
-	rtsp_cc_session client_connection;
+	//rtsp_cc_session client_connection;
 };
 
 
@@ -118,8 +131,8 @@ int rtsp_on_recv_PAUSE();
 int rtsp_on_recv_GET_PARAMETER();
 int rtsp_on_recv_UNSUPPORTED();
 
-void rtsp_server_set_response();
-
+int rtsp_server_media_subsession_add(rtsp_sm_session *session, rtsp_sm_subsession *subsession);
+rtsp_sm_subsession * rtsp_sm_subsession_create(struct rtp_source *src, struct rtp_sink *sink, int max_sdp_size);
 struct rtsp_server *rtsp_server_create(int max_subsession_nb);
 int rtsp_server_setup(struct rtsp_server *server, const u8* server_url, int port);
 int rtsp_server_launch(struct rtsp_server *server);

@@ -27,7 +27,7 @@ void sdp_fill_i_field(unsigned char *sdp_buf, int size, u8 * session_info);
 void sdp_fill_u_field(unsigned char * sdp_buf, int size, u8 *uri);
 void sdp_fill_c_field(unsigned char *sdp_buf, int size, u8 *nettype, u8 *addrtype, u8 *connection_addr, u8 ttl);
 void sdp_fill_b_field(unsigned char *sdp_buf, int size, int bwtype, int bw);
-void sdp_fill_t_field(unsigned char *sdp_buf, int size, u32 start_time, u32 end_time);
+void sdp_fill_t_field(unsigned char *sdp_buf, int size, u64 start_time, u64 end_time);
 void sdp_fill_m_field(unsigned char *sdp_buf, int size, int media_type, u16 port, int fmt);
 void sdp_fill_a_string(unsigned char *sdp_buf, int size, u8 *string);
 void sdp_fill_a_rtpmap(unsigned char *sdp_buf, int size, struct codec_info *codec);
