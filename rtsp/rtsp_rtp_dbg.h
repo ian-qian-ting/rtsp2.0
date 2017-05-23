@@ -6,7 +6,7 @@
 
 /* error code */
 #define EPERM	1
-#define EIO		5
+#define EIO	5
 #define EAGAIN	11
 #define ENOMEM	12
 #define EINVAL	22 
@@ -15,9 +15,9 @@
 #define DEBUG_LEVEL_1	1
 #define DEBUG_LEVEL_2   2
 
-#define DEBUG_RTSP_LEVEL DEBUG_LEVEL_2
-#define DEBUG_RTP_LEVEL DEBUG_LEVEL_2
-#define DEBUG_RTCP_LEVEL DEBUG_LEVEL_2
+#define DEBUG_RTSP_LEVEL DEBUG_LEVEL_1
+#define DEBUG_RTP_LEVEL DEBUG_LEVEL_1
+#define DEBUG_RTCP_LEVEL DEBUG_LEVEL_1
 
 /*********************************************for rtsp level debug*****************************************/
 

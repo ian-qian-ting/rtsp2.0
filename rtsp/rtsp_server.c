@@ -27,14 +27,46 @@ static u8 client_lower_port_bitmap = 0;
 static _mutex client_lower_port_lock = NULL;
 static u8 server_lower_port_bitmap = 0;
 static _mutex server_lower_port_lock = NULL;
+static atomic_t lock_ref_cnt = {0};
+
+//for debug purpose only
+#if 1
+void rtsp_req_dump(u8 *str, int len)
+{
+    str[len] = '\0';
+    printf("\n\rrequest:");
+    printf("\n\r%s", str);
+}
+
+void rtsp_res_dump(u8 *str, int len)
+{
+    str[len] = '\0';
+    printf("\n\rresponse:");
+    printf("\n\r%s", str);
+}
+
+void rtsp_transport_dump(struct rtsp_transport *transport)
+{
+  printf("\n\rcast_mode:%d", transport->cast_mode);
+  printf("\n\rprotocol:%d", transport->proto);
+  printf("\n\rlower protocol:%d", transport->lower_proto);
+  printf("\n\rttl:%d", transport->ttl);
+  printf("\n\rport_even:%d", transport->port_even);
+  printf("\n\rclient_port_even:%d", transport->client_port_even);
+  printf("\n\rserver_port_even:%d", transport->server_port_even);
+  printf("\n\rssrc:%x", transport->ssrc);
+}
+#endif
 
 //this range param should be aligned with port bitmap type size
 static int rtsp_get_port(int base, int range, u8* bitmap)
 {
 	int find = -1;
-	for(int i = 0; i < range; i += 2)
+        int i, tmp;
+        tmp = *bitmap;
+	for(i = 0; i < range; i += 2)
 	{
-		if(*bitmap&(1 << i) == 0)
+		if(!((tmp>>i)&1))
 		{
 			//set bit
 			find = base + i;
@@ -47,8 +79,9 @@ static int rtsp_get_port(int base, int range, u8* bitmap)
 
 static void rtsp_put_port(int base, int range, u8* bitmap, int port)
 {
+        int tmp = *bitmap;
 	int bit = (port - base)/2;
-	if(*bitmap&(1 << bit) == 1)
+	if((tmp>>bit)&1)
 	{
 		//clear bit
 		*bitmap &= !(1 << bit);
@@ -62,31 +95,10 @@ static u8* rtsp_parse_header_line(struct rtsp_message *msg, u8 *header, int *siz
 		int parse_item = 0;
 		u8 b_tmp[16];
 		p_start = p_tmp = p_end = header;
-		while(*p_end != ':' && !is_line_end(p_end) && offset <= *size_left)
-		{
-			p_end++;
-			offset++;
-		}
-		if(*p_end != ':')//invalid header
-		{
-			*size_left = 0;
-			return NULL;
-		}
-		//header type check
-		memset(b_tmp, 0, 16);
-		memcpy(b_tmp, p_tmp, p_end - p_tmp);
-		b_tmp[p_end - p_tmp] = '\0';
-		if(strncmp(b_tmp, "Request", 7) != 0)//invalid header
-		{
-			*size_left = 0;
-			return NULL;
-		}
-		p_end++;
-		offset++;
-		p_tmp = p_end; //skip space
+
 		while(!is_line_end(p_end) && offset <= *size_left)
 		{
-			if(*p_end == ' ')
+			if(*p_end == ' ' || *p_end == '\r')
 			{
 				memset(b_tmp, 0, 16);
 				if(parse_item == 0)//parse method
@@ -132,12 +144,12 @@ static u8* rtsp_parse_header_line(struct rtsp_message *msg, u8 *header, int *siz
 			p_end++;
 			offset++;
 		}
-		if(*p_end == '\r')
+		if(*p_end == '\n')
 		{
 			//copy request line without CRLF
-			if(p_end-p_start < REQ_LINE_BUF_SIZE)
+			if(p_end-p_start-1 < REQ_LINE_BUF_SIZE)
 			{
-				memcpy(msg->request_line, p_start, p_end-p_start);
+				memcpy(msg->request_line, p_start, p_end-p_start-1);
 				msg->request_line[p_end-p_start] = '\0';
 			}
 			else
@@ -146,9 +158,9 @@ static u8* rtsp_parse_header_line(struct rtsp_message *msg, u8 *header, int *siz
 				msg->request_line[REQ_LINE_BUF_SIZE - 1] = '\0';
 			}
 			//skip CRLF
-			p_end += 2;
-			offset += 2;
-			*size_left -= offset;	
+			p_end += 1;
+			offset += 1;
+			*size_left -= offset;
 			return p_end;
 		}else{
 			//fall into error
@@ -162,7 +174,6 @@ static u8* rtsp_parse_body_line(struct rtsp_message *msg, u8 *body, int *size_le
 		u8 *p_start, *p_tmp, *p_end, *token;
 		u8 offset = 0;
 		int parse_item = 0;
-		int tmp = 0;
 		char delimeter [] = "/=-";
 		u8 b_tmp[64] = {0};
 		p_start = p_tmp = p_end = body;
@@ -196,8 +207,6 @@ static u8* rtsp_parse_body_line(struct rtsp_message *msg, u8 *body, int *size_le
 					memcpy(b_tmp, p_tmp, p_end - p_tmp);
 					b_tmp[p_end - p_tmp] = '\0';
 					msg->CSeq = atoi(b_tmp);
-					p_end = p_end + 2; //skip CRLF
-					offset += 2;
 					break;
 				}
 				p_end++;
@@ -207,7 +216,6 @@ static u8* rtsp_parse_body_line(struct rtsp_message *msg, u8 *body, int *size_le
 			{
 				while(!is_line_end(p_end) && offset <= *size_left)
 				{
-
 					if(*p_end == ';'||*p_end == '\r')
 					{	
 						if(parse_item == 0)
@@ -315,74 +323,29 @@ static u8* rtsp_parse_body_line(struct rtsp_message *msg, u8 *body, int *size_le
 							p_tmp = p_end;//skip ';'
 						}else if(*p_end == '\r')
 						{
-							p_end += 2;
-							offset += 2;
-							p_tmp = p_end;//skip CRLF
+							break;
 						}
 					}else{
 						p_end++;
 						offset++;
 					}
 				}
-				//to do check unconfigured fields and set default value here
-				if(msg->transport.proto == TRANS_PROTO_UNKNOWN)
-					msg->transport.proto = TRANS_PROTO_RTP;
-				if(msg->transport.lower_proto == TRANS_LOWER_PROTO_UNKNOWN)
-					msg->transport.lower_proto = TRANS_LOWER_PROTO_UDP;
-				if(msg->transport.cast_mode == UNICAST_MODE)
-				{
-					if(msg->transport.client_port_even == 0 || msg->transport.client_port_odd == 0)
-					{
-						rtw_mutex_get(&client_lower_port_lock);
-						tmp = rtsp_get_port(CLIENT_LOWER_PORT_BASE, 8, &client_lower_port_bitmap);
-						rtw_mutex_put(&client_lower_port_lock);
-						msg->transport.client_port_even = (tmp%2) ? tmp+1 : tmp;
-						msg->transport.client_port_odd = msg->transport.client_port_even + 1;
-					}
-					if(msg->transport.server_port_even == 0 || msg->transport.server_port_odd == 0)
-					{
-						rtw_mutex_get(&server_lower_port_lock);
-						tmp = rtsp_get_port(SERVER_LOWER_PORT_BASE, 8, &server_lower_port_bitmap);
-						rtw_mutex_put(&server_lower_port_lock);
-						msg->transport.server_port_even = (tmp%2) ? tmp+1 : tmp;
-						msg->transport.server_port_odd = msg->transport.server_port_even + 1;
-					}
-					if(msg->transport.ssrc == 0)
-						msg->transport.ssrc = rtw_get_current_time();
-				}else if(msg->transport.cast_mode == MULTICAST_MODE)
-				{
-					if(msg->transport.port_even == 0 || msg->transport.port_odd == 0)
-					{
-						rtw_mutex_get(&lower_port_lock);
-						tmp = rtsp_get_port(LOWER_PORT_BASE, 8, &lower_port_bitmap);
-						rtw_mutex_put(&lower_port_lock);
-						msg->transport.port_even = (tmp%2) ? tmp+1 : tmp;
-						msg->transport.port_odd = msg->transport.port_even + 1;						
-					}
-					if(msg->transport.ttl == 0 || msg->transport.ttl >256)
-						msg->transport.ttl = 1;
-				}else if(msg->transport.ssrc == 0)
-				{
-					rtw_get_random_bytes(&msg->transport.ssrc, sizeof(msg->transport.ssrc));
-					if(msg->transport.ssrc < 0x10000000)
-						msg->transport.ssrc += 0x10000000;
-				}
-				
-			}else{
-					while(!is_line_end(p_end) && offset <= *size_left)
-					{
-						p_end ++;
-						offset ++;
-					}
-				}
-		if(*p_end == '\r')
+			}
+                while(!is_line_end(p_end) && offset <= *size_left)
+                {
+                        p_end ++;
+                        offset ++;
+                }
+
+		if(*p_end == '\n')
 		{
 			//skip CRLF
-			p_end += 2;
-			offset += 2;
+			p_end += 1;
+			offset += 1;
 			*size_left -= offset;
 			return p_end;
 		}else{
+                        printf("\n\rparsing line error");
 			*size_left = 0;
 			return NULL;
 		}
@@ -393,14 +356,14 @@ int rtsp_parse_request(struct rtsp_message *msg, u8 *request, int size)
                 u8 *p_start, *p_body;
 		p_start = p_body = NULL;
 		int size_left = size;
+                msg->method = RTSP_REQ_UNDEFINED;
 		//is it a rtsp request?
 		if(request == NULL || *request == '\0' || size <= 0)
 		{
-			RTSP_WARN("\n\rinvalid request - (NULL request)");
-			return -EINVAL;
+			//RTSP_WARN("\n\rinvalid request - (NULL request)");
+			return -EAGAIN;
 		}
-		p_start = request;
-		p_body = rtsp_parse_header_line(msg, p_start, &size_left);
+		p_body = rtsp_parse_header_line(msg, request, &size_left);
 		if(msg->method == RTSP_REQ_UNDEFINED)
 		{
 			RTSP_WARN("\n\rinvalid request - (UNDEFINED request)");
@@ -408,12 +371,14 @@ int rtsp_parse_request(struct rtsp_message *msg, u8 *request, int size)
 		}			
 		while(p_body != NULL && *p_body != '\0' && size_left > 0)
 		{
+                        //printf("\n\rline:%c size left:%d", *p_body, size_left);
 			p_body = rtsp_parse_body_line(msg, p_body, &size_left);
 		}
 		return 0;
 }
 
 /* rtsp server media session */
+void rtsp_set_rtp_task(rtsp_sm_subsession *subsession, void (*rtp_task_handle)(void *ctx));
 
 void rtsp_sm_subsession_free(rtsp_sm_subsession *subsession)
 {
@@ -432,6 +397,59 @@ void rtsp_sm_session_free(rtsp_sm_session *session)
 			list_del(&subsession->media_anchor);
 			rtsp_sm_subsession_free(subsession);
 		}	
+}
+
+void rtsp_sm_subsession_refresh(rtsp_sm_subsession *subsession)
+{
+        rtsp_cc_session *c = &subsession->client;
+        struct rtsp_transport *transport = &c->transport;
+        if(c->is_handled)
+        {
+                c->client_socket = -1;
+                //client ip is inherited from rtsp server struct 
+                //so we dont need to free it here since it will be handled elsewhere
+                c->client_ip = NULL;
+                if(transport->client_port_even != 0)
+                {
+                        rtw_mutex_get(&client_lower_port_lock);
+                        rtsp_put_port(CLIENT_LOWER_PORT_BASE, 8, &client_lower_port_bitmap, transport->client_port_even);
+                        rtw_mutex_put(&client_lower_port_lock);                    
+                }
+                if(transport->server_port_even != 0)
+                {
+                        rtw_mutex_get(&server_lower_port_lock);
+                        rtsp_put_port(SERVER_LOWER_PORT_BASE, 8, &server_lower_port_bitmap, transport->server_port_even);
+                        rtw_mutex_put(&server_lower_port_lock);                 
+                }      
+                if(transport->port_even)
+                {
+                        rtw_mutex_get(&lower_port_lock);
+                        rtsp_put_port(LOWER_PORT_BASE, 8, &lower_port_bitmap, transport->port_even);
+                        rtw_mutex_put(&lower_port_lock);                 
+                }
+                memset(transport, 0, sizeof(struct rtsp_transport));
+                c->is_handled = 0;
+        }
+        subsession->task_id = NULL;
+        rtsp_set_rtp_task(subsession, NULL);
+}
+
+void rtsp_sm_session_refresh(rtsp_sm_session *session)
+{
+        struct rtsp_server *server = (struct rtsp_server *)session->parent_server;
+        struct rtsp_session_info *s = &session->session_info;
+        rtsp_sm_subsession *subsession = NULL;
+	if(s->user != NULL)
+		free(s->user);
+	if(s->name != NULL)
+		free(s->name);
+	if(s->info != NULL)
+		free(s->info); 
+        memset(s, 0, sizeof(struct rtsp_session_info));
+	list_for_each_entry(subsession, &server->server_media.media_entry, media_anchor, rtsp_sm_subsession)
+	{        
+                rtsp_sm_subsession_refresh(subsession);
+        }
 }
 
 rtsp_sm_subsession * rtsp_sm_subsession_create(rtp_source_t *src, rtp_sink_t *sink, int max_sdp_size)
@@ -463,15 +481,15 @@ int rtsp_sm_subsession_add(rtsp_sm_session *session, rtsp_sm_subsession *subsess
 {
 		//p_rtsp_sm_subsession tmp = NULL;
 		//check if server reach maximum subsession number
-		if(session->subsession_cnt >= session->max_subsession_nb)
+		if(ATOMIC_READ(&session->subsession_cnt) >= session->max_subsession_nb)
 		{
 			RTSP_WARN("\n\rmax subsession cnt reached!");
 			return -EPERM;
 		}
-		subsession->id = session->subsession_cnt;
+		subsession->id = ATOMIC_READ(&session->subsession_cnt);
 		list_add_tail(&subsession->media_anchor, &session->media_entry);
 		subsession->parent_session = (void *)session;
-		session->subsession_cnt++;
+                ATOMIC_INC(&session->subsession_cnt);
 		return 0;
 }
 
@@ -479,8 +497,8 @@ void rtsp_sm_clear_session(rtsp_sm_session *session)
 {
 		INIT_LIST_HEAD(&session->media_entry);
 		session->my_sdp_content_len = 0;
-		session->subsession_cnt = 0;
-		session->reference_cnt = 0;			
+		ATOMIC_SET(&session->subsession_cnt, 0);
+		ATOMIC_SET(&session->reference_cnt, 0);			
 }
 
 void rtsp_sm_clear_all(rtsp_sm_session *session)
@@ -491,8 +509,8 @@ void rtsp_sm_clear_all(rtsp_sm_session *session)
 		INIT_LIST_HEAD(&session->media_entry);
 		session->my_sdp_max_len = 0;
 		session->my_sdp_content_len = 0;
-		session->subsession_cnt = 0;
-		session->reference_cnt = 0;		
+		ATOMIC_SET(&session->subsession_cnt, 0);
+		ATOMIC_SET(&session->reference_cnt, 0);		
 }
 
 int rtsp_sm_setup(rtsp_sm_session *session, void *parent, int max_subsession_nb, int max_sdp_size)
@@ -510,8 +528,8 @@ int rtsp_sm_setup(rtsp_sm_session *session, void *parent, int max_subsession_nb,
 		session->my_sdp_max_len = max_sdp_size;
 		INIT_LIST_HEAD(&session->media_entry);
 		session->my_sdp_content_len = 0;
-		session->subsession_cnt = 0;
-		session->reference_cnt = 0;
+		ATOMIC_SET(&session->subsession_cnt, 0);
+		ATOMIC_SET(&session->reference_cnt, 0);
 		return 0;
 }
 
@@ -523,7 +541,13 @@ void rtsp_server_free(struct rtsp_server *server)
 		free(server->adapter);
 		free(server->client_ip);
 		free(server->server_ip);
-		free(server);		
+		free(server);
+                if(ATOMIC_DEC_AND_TEST(&lock_ref_cnt))
+                {
+                    rtw_mutex_free(&client_lower_port_lock);
+                    rtw_mutex_free(&server_lower_port_lock);
+                    rtw_mutex_free(&lower_port_lock);
+                }
 }
 
 struct rtsp_server *rtsp_server_create(rtsp_server_adapter *adapter)
@@ -559,7 +583,15 @@ struct rtsp_server *rtsp_server_create(rtsp_server_adapter *adapter)
 			return NULL;
 		}
 		server->server_socket = -1;
+                server->client_socket = -1;
 		server->adapter = adapter;
+                if(client_lower_port_lock == NULL)
+                    rtw_mutex_init(&client_lower_port_lock);
+                if(server_lower_port_lock == NULL)
+                    rtw_mutex_init(&server_lower_port_lock);
+                if(lower_port_lock == NULL)
+                    rtw_mutex_init(&lower_port_lock);
+                ATOMIC_INC(&lock_ref_cnt);
 		return server;
 }
 
@@ -606,6 +638,7 @@ void rtp_unicast_service(void *ctx)
 {
         int ret;
 	p_rtsp_sm_subsession subsession = (p_rtsp_sm_subsession)ctx;
+        rtp_sink_t *sink = subsession->sink;
 	p_rtsp_sm_session session = subsession->parent_session;
 	struct rtsp_server *server = (struct rtsp_server *)session->parent_server;
 	int rtp_socket, rtp_port;
@@ -616,11 +649,15 @@ void rtp_unicast_service(void *ctx)
 	struct sockaddr_in rtcp_addr;
 	socklen_t rtcp_addrlen = sizeof(struct sockaddr_in);
 #endif	
+        //wait until server state change to RTSP_PLAYING
+        //rtw_msleep_os(1000);
+        
 	rtp_socket = socket(AF_INET, SOCK_DGRAM, 0);
 	rtp_port = subsession->client.transport.server_port_even;
 	memset(&rtp_addr, 0, rtp_addrlen);
 	rtp_addr.sin_family = AF_INET;
 	rtp_addr.sin_addr.s_addr = *(uint32_t *)(server->server_ip);
+        rtp_addr.sin_port = _htons(rtp_port);
 	if(bind(rtp_socket, (struct sockaddr *)&rtp_addr, rtp_addrlen)<0)
 	{
 		RTSP_ERROR("bind failed");
@@ -628,10 +665,11 @@ void rtp_unicast_service(void *ctx)
 	}
 #if 0	
 	rtcp_socket = socket(AF_INET, SOCK_DGRAM, 0);
-	rtcp_port = subsession->client.transport.server_port_even;
+	rtcp_port = subsession->client.transport.server_port_odd;
 	memset(&rtp_addr, 0, rtcp_addrlen);
 	rtcp_addr.sin_family = AF_INET;
 	rtcp_addr.sin_addr.s_addr = *(uint32_t *)(server->server_ip);
+        rtcp_addr.sin_port = _htons(rtcp_port);
 	if(bind(rtcp_socket, (struct sockaddr *)&rtcp_addr, rtcp_addrlen)<0)
 	{
 		RTSP_ERROR("bind failed");
@@ -639,24 +677,64 @@ void rtp_unicast_service(void *ctx)
 	}
 #endif
 	//default implementation via UDP
-	//do we need to resynch the status here?
+	//init sink status here
+        sink->rtp_sock = rtp_socket;
+#if 0
+        sink->rtcp_sock = rtcp_socket;
+#endif
+        sink->ssrc = subsession->client.transport.ssrc;
+        sink->base_ts = 0;
+        sink->seq_no = 0;
+        sink->packet_cnt = 0;
+        sink->octet_cnt = 0;
+        sink->total_octet_cnt = 0;
+        
+        //init codec specific extra ctx if any
+        if(subsession->sink->media_hdl_ops->packet_extra_init)
+        {
+            ret = subsession->sink->media_hdl_ops->packet_extra_init((void *)subsession);
+            if(ret < 0)
+                goto exit;
+        }
 	//do we need a signal to indicate service start?
+        ATOMIC_INC(&server->server_media.reference_cnt);
 restart:	
 	while(server->state_now == RTSP_PLAYING && server->is_launched)
 	{
-		if(subsession->sink->media_hdl_opts->codec_send)
-                    ret = subsession->sink->media_hdl_opts->codec_send((void *)subsession);
-		//update status here 
-                
-                rtw_msleep_os(1);
+		if(subsession->sink->media_hdl_ops->packet_send)
+                {
+                    if(rtp_sink_wait_frame_ready(sink) < 0)
+                          continue;
+                    rtp_sink_ind_frame_process(sink);
+                    ret = subsession->sink->media_hdl_ops->packet_send((void *)subsession);
+                    if(ret < 0)
+                    {
+                        //record packet loss
+                    }
+                    rtp_sink_ind_frame_sent(subsession->sink);
+                }
+                    //update status here 
+                if(sink->seq_no == 0)
+                    sink->base_ts = sink->now_ts;
+                //rtw_msleep_os(1);
 	}
+pause:
 	rtw_msleep_os(1000);
 	if(server->state_now == RTSP_READY)
 	{
 		goto restart;
 	}
+        ATOMIC_DEC(&server->server_media.reference_cnt);
+        //deinit codec specific extra ctx if any
+        if(subsession->sink->media_hdl_ops->packet_extra_deinit)
+                subsession->sink->media_hdl_ops->packet_extra_deinit((void *)subsession);        
 exit:
+        server->state_now = RTSP_INIT;  
 	close(rtp_socket);
+#if 0
+        close(rtcp_socket);
+#endif        
+        RTSP_INFO("rtp session closed");
 	vTaskDelete(NULL);	
 }
 
@@ -668,7 +746,7 @@ void rtp_multicast_service(void *ctx)
 int rtsp_on_req_OPTIONS(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter))
 {       
 	u8 response[256] = {0};
-	if(server->CSeq_now > server->message.CSeq)
+	if(server->CSeq_now > server->message.CSeq && server->state_now != RTSP_INIT)
         {
                 RTSP_WARN("CSeq out of order");
 		return -EINVAL;
@@ -680,6 +758,7 @@ int rtsp_on_req_OPTIONS(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext
 						"CSeq: %d" CRLF \
 						PUBLIC_CMD_STR CRLF \
 						CRLF, server->CSeq_now);
+        //rtsp_res_dump(response, strlen(response));
 	return write(server->client_socket, response, strlen(response));
 }
 
@@ -741,12 +820,12 @@ static u8 *extradata2config(void *extra)
 
    if(strlen(extra) > 1024)
    {
-        RTSP_PRINTF("\n\rtoo much extra data!");
+        RTSP_INFO("\n\rtoo much extra data!");
         return NULL;
    }
    config = malloc(10 + strlen(extra)*2);
    if (config == NULL) {
-       RTSP_PRINTF("\n\rallocate config memory failed");
+       RTSP_INFO("\n\rallocate config memory failed");
        return NULL;
    }
    memcpy(config, "; config=", 9);
@@ -849,6 +928,7 @@ void rtsp_create_sdp(struct rtsp_server *server)
 			sdp_fill_m_field(sdp_buf, max_len, subsession->sink->media_type, 0, subsession->sink->pt);
 		sdp_fill_subsession_a_field(sdp_buf, max_len, subsession);
 	}
+        server->server_media.my_sdp_content_len = strlen(sdp_buf);
 }
 
 int rtsp_on_req_DESCRIBE(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter))
@@ -883,7 +963,8 @@ int rtsp_on_req_DESCRIBE(struct rtsp_server *server, int (*rtsp_req_cb)(void *ex
 						"Content-Length: %d" CRLF \
 						CRLF \
 						"%s", server->CSeq_now, server->server_ip[0], server->server_ip[1], server->server_ip[2], server->server_ip[3], server->server_media.my_sdp_content_len, server->server_media.my_sdp);
-	return write(server->client_socket, response, strlen(response));
+        //rtsp_res_dump(response, strlen(response));	
+        return write(server->client_socket, response, strlen(response));
 }
 
 int rtsp_on_req_GET_PARAMETER(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter))
@@ -901,7 +982,8 @@ int rtsp_on_req_GET_PARAMETER(struct rtsp_server *server, int (*rtsp_req_cb)(voi
 						"CSeq: %d" CRLF \
 						"Session: %x:timeout=%d" CRLF\
 						CRLF, server->CSeq_now, server->server_media.session_info.session_id, server->server_media.session_info.session_timeout);
-	return write(server->client_socket, response, strlen(response));							
+        //rtsp_res_dump(response, strlen(response));
+        return write(server->client_socket, response, strlen(response));							
 }
 
 void rtsp_set_rtp_task(rtsp_sm_subsession *subsession, void (*rtp_task_handle)(void *ctx))
@@ -911,7 +993,7 @@ void rtsp_set_rtp_task(rtsp_sm_subsession *subsession, void (*rtp_task_handle)(v
 
 int rtsp_start_rtp_task(rtsp_sm_subsession *subsession)
 {
-	if(xTaskCreate(*subsession->rtp_task_handle, ((const signed char*)"rtp_s_service"), 2048, (void *)subsession, RTP_SERVICE_PRIORITY, subsession->task_id) != pdPASS)
+	if(xTaskCreate(subsession->rtp_task_handle, ((const signed char*)"rtp_s_service"), 2048, (void *)subsession, RTP_SERVICE_PRIORITY, subsession->task_id) != pdPASS)
 	{
 		RTSP_ERROR("\n\rrtp session %d service: Create Task Error\n", subsession->id);
 		return -1;;
@@ -919,10 +1001,53 @@ int rtsp_start_rtp_task(rtsp_sm_subsession *subsession)
 	return 0;
 }
 
-//void rtsp_set_media_handle(struct rtsp_server *server, rtsp_cm_subsession *subsession)
-//{
-//		
-//}
+static void rtsp_transport_check_fix(struct rtsp_transport *transport)
+{
+        int tmp = 0;
+        //check unconfigured fields and set default value here
+        if(transport->proto == TRANS_PROTO_UNKNOWN)
+                transport->proto = TRANS_PROTO_RTP;
+        if(transport->lower_proto == TRANS_LOWER_PROTO_UNKNOWN)
+                transport->lower_proto = TRANS_LOWER_PROTO_UDP;
+        if(transport->cast_mode == UNICAST_MODE)
+        {
+                if(transport->client_port_even == 0 || transport->client_port_odd == 0)
+                {
+
+                        rtw_mutex_get(&client_lower_port_lock);
+                        tmp = rtsp_get_port(CLIENT_LOWER_PORT_BASE, 8, &client_lower_port_bitmap);
+                        rtw_mutex_put(&client_lower_port_lock);
+                        transport->client_port_even = (tmp%2) ? tmp+1 : tmp;
+                        transport->client_port_odd = transport->client_port_even + 1;
+                }
+                if(transport->server_port_even == 0 || transport->server_port_odd == 0)
+                {
+                        rtw_mutex_get(&server_lower_port_lock);
+                        tmp = rtsp_get_port(SERVER_LOWER_PORT_BASE, 8, &server_lower_port_bitmap);
+                        rtw_mutex_put(&server_lower_port_lock);
+                        transport->server_port_even = (tmp%2) ? tmp+1 : tmp;
+                        transport->server_port_odd = transport->server_port_even + 1;
+                }
+        }else if(transport->cast_mode == MULTICAST_MODE)
+        {
+                if(transport->port_even == 0 || transport->port_odd == 0)
+                {
+                        rtw_mutex_get(&lower_port_lock);
+                        tmp = rtsp_get_port(LOWER_PORT_BASE, 8, &lower_port_bitmap);
+                        rtw_mutex_put(&lower_port_lock);
+                        transport->port_even = (tmp%2) ? tmp+1 : tmp;
+                        transport->port_odd = transport->port_even + 1;						
+                }
+                if(transport->ttl == 0 || transport->ttl >256)
+                        transport->ttl = 1;
+        }
+        if(transport->ssrc == 0)
+        {
+                rtw_get_random_bytes(&transport->ssrc, sizeof(transport->ssrc));
+                if(transport->ssrc < 0x10000000)
+                        transport->ssrc += 0x10000000;
+        }        
+}
 
 int rtsp_on_req_SETUP(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter))
 {
@@ -946,14 +1071,17 @@ int rtsp_on_req_SETUP(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_a
 			subsession->client.client_socket = server->client_socket;
 			subsession->client.client_ip = server->client_ip;
 			memcpy(&subsession->client.transport, &server->message.transport, sizeof(struct rtsp_transport));
+                        rtsp_transport_check_fix(&subsession->client.transport);
+                        //rtsp_transport_dump(&subsession->client.transport);
 			//set default unicast mode for testing
 			rtsp_set_rtp_task(subsession, rtp_unicast_service);
 			//rtsp_set_media_handle(subsession);
 			subsession->client.is_handled = 1;
+                        printf("\n\rsubsession %d handled", subsession->id);
 			break;
 		}
 	}
-	if(iter_cnt >= server->server_media.subsession_cnt)
+	if(iter_cnt >= ATOMIC_READ(&server->server_media.subsession_cnt) && subsession->client.is_handled)
 		server->state_now = RTSP_READY;
 	memset(&server->message.transport, 0, sizeof(struct rtsp_transport));
 	if(rtsp_req_cb)
@@ -979,7 +1107,7 @@ int rtsp_on_req_SETUP(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_a
                                           STR_UNICAST, subsession->client.transport.client_port_even, subsession->client.transport.client_port_odd, \
                                           subsession->client.transport.server_port_even, subsession->client.transport.server_port_odd, subsession->client.transport.ssrc);			
 		}else{
-			RTSP_ERROR("missing param!");
+			RTSP_ERROR("missing param1!");
 			return -EINVAL;			
 		}
 	}else if(subsession->client.transport.cast_mode == MULTICAST_MODE)
@@ -991,9 +1119,10 @@ int rtsp_on_req_SETUP(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_a
                                           CRLF, server->CSeq_now, server->server_media.session_info.session_id, server->server_media.session_info.session_timeout, \
                                           STR_MULTICAST, subsession->client.transport.port_even, subsession->client.transport.port_odd, subsession->client.transport.ttl, subsession->client.transport.ssrc);		
 	}else{
-		RTSP_ERROR("missing param!");
+		RTSP_ERROR("missing param2!");
 		return -EINVAL;		
 	}
+        //rtsp_res_dump(response, strlen(response));        
 	return write(server->client_socket, response, strlen(response));	
 }
 
@@ -1001,6 +1130,7 @@ int rtsp_on_req_PLAY(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_ad
 {
 	u8 response[128] = {0};
 	p_rtsp_sm_subsession subsession = NULL;
+        int timer = 100;
 	int ret = 0;
 	if(server->CSeq_now > server->message.CSeq)
         {
@@ -1014,11 +1144,13 @@ int rtsp_on_req_PLAY(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_ad
 		return -EINVAL;
 	}
 	if(rtsp_req_cb)
-            rtsp_req_cb(server->adapter->ext_adapter);	
-	server->state_now = RTSP_PLAYING;
+            rtsp_req_cb(server->adapter->ext_adapter);
+        server->state_now = RTSP_PLAYING;	
 	//start rtp session here
 	list_for_each_entry(subsession, &server->server_media.media_entry, media_anchor, rtsp_sm_subsession)
 	{
+#if 1
+                rtp_sink_packet_init(subsession->sink);
 		ret = rtsp_start_rtp_task(subsession);
 		if(ret < 0)
 		{
@@ -1026,13 +1158,29 @@ int rtsp_on_req_PLAY(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_ad
 			//server->state_now = RTSP_INIT;
 			return -1;
 		}
-	}	
-	
+#endif
+	}
+        while(ATOMIC_READ(&server->server_media.reference_cnt) < ATOMIC_READ(&server->server_media.subsession_cnt))
+        {
+            rtw_msleep_os(10);
+            if(--timer <= 0)
+            {
+                server->state_now = RTSP_INIT;
+                sprintf(response, RTSP_RES_SNF CRLF \
+                                                        "CSeq: %d" CRLF \
+                                                        "Session: %x" CRLF \
+                                                        CRLF, server->CSeq_now, server->server_media.session_info.session_id);	
+                return write(server->client_socket, response, strlen(response));                
+            }   
+        }
+        
+	RTSP_INFO("rtp session start");
 	sprintf(response, RTSP_RES_OK CRLF \
 						"CSeq: %d" CRLF \
 						"Session: %x" CRLF \
 						CRLF, server->CSeq_now, server->server_media.session_info.session_id);
-	return write(server->client_socket, response, strlen(response));
+        //rtsp_res_dump(response, strlen(response));	
+        return write(server->client_socket, response, strlen(response));
 }
 
 int rtsp_on_req_TEARDOWN(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter))
@@ -1051,7 +1199,8 @@ int rtsp_on_req_TEARDOWN(struct rtsp_server *server, int (*rtsp_req_cb)(void *ex
 						"CSeq: %d" CRLF \
 						"Session: %x" CRLF \
 						CRLF, server->CSeq_now, server->server_media.session_info.session_id);
-	return write(server->client_socket, response, strlen(response));
+        //rtsp_res_dump(response, strlen(response));
+        return write(server->client_socket, response, strlen(response));
 }
 
 int rtsp_on_req_PAUSE(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter))
@@ -1070,7 +1219,8 @@ int rtsp_on_req_PAUSE(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_a
 						"CSeq: %d" CRLF \
 						"Session: %x" CRLF \
 						CRLF, server->CSeq_now, server->server_media.session_info.session_id);
-	return write(server->client_socket, response, strlen(response));	
+        //rtsp_res_dump(response, strlen(response));	
+        return write(server->client_socket, response, strlen(response));	
 }
 
 int rtsp_on_req_UNDEFINED(struct rtsp_server *server, int (*rtsp_req_cb)(void *ext_adapter))
@@ -1083,11 +1233,11 @@ int rtsp_on_req_UNDEFINED(struct rtsp_server *server, int (*rtsp_req_cb)(void *e
         }
 	server->CSeq_now = server->message.CSeq;        
 	if(rtsp_req_cb)
-            rtsp_req_cb(server->adapter->ext_adapter);	
+            rtsp_req_cb(server->adapter->ext_adapter);
+        server->state_now = RTSP_INIT;
 	sprintf(response, RTSP_RES_BAD CRLF \
 						"CSeq: %d" CRLF \
-						"Session: %x" CRLF \
-						CRLF, server->CSeq_now, server->server_media.session_info.session_id);
+						CRLF, server->CSeq_now);
 	return write(server->client_socket, response, strlen(response));	
 }
 
@@ -1110,7 +1260,7 @@ static int rtsp_check_wifi_connectivity(const char *ifname, int *mode)
 void rtsp_server_service(void *ctx)
 {
 		struct rtsp_server *server = (struct rtsp_server *)ctx;
-		u8 request[REQUEST_BUF_SIZE];
+		u8 *request;
 		int opt = 1;
 		int mode = 0;
 		int ret;
@@ -1119,6 +1269,11 @@ void rtsp_server_service(void *ctx)
                 socklen_t client_addr_len = sizeof(struct sockaddr_in);
 		fd_set server_read_fds, client_read_fds;
 		struct timeval s_listen_timeout, c_listen_timeout;
+                if((request = malloc(REQUEST_BUF_SIZE)) == NULL)
+                {
+                        RTSP_ERROR("rtsp request buffer allocate fail");
+                        goto exit;
+                }
 //first check wifi connectivity
 restart:
 		time_base = rtw_get_current_time();
@@ -1127,9 +1282,10 @@ restart:
 			time_now = rtw_get_current_time();
 			if((time_now - time_base) > rtsp_launch_timeout)
 			{
-				RTSP_ERROR("\n\rrtsp service time out - wifi not ready");
+				RTSP_ERROR("rtsp service time out - wifi not ready");
 				goto exit;
 			}
+                        rtw_msleep_os(10);
 		}
 //socket init
 		server->server_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -1152,6 +1308,9 @@ restart:
 			goto exit1;
 		}
 		listen(server->server_socket, 1);
+                //indicate server launched
+                server->is_launched = 1;
+                RTSP_WARN("rtsp server start...");
 		//enter service loop
 		while(server->is_launched)
 		{
@@ -1169,8 +1328,9 @@ restart:
 					close(server->client_socket);
 					continue;
 				}
-				//load client ip address and port from client_addr
-				
+				//load client ip address from client_addr
+				*(u32 *)server->client_ip = client_addr.sin_addr.s_addr;
+                                //printf("\n\rclient ip:%x", *(u32 *)server->client_ip);
 				//enter negotiation process
 				while(server->is_launched)
 				{
@@ -1183,46 +1343,51 @@ restart:
 					{
 						memset(request, 0, REQUEST_BUF_SIZE);
 						ret = read(server->client_socket, request, REQUEST_BUF_SIZE);
+                                                //rtsp_req_dump(request, ret);
 						//check and parse request
-						rtsp_parse_request(&server->message, request, ret);
-						switch(server->message.method)
-						{
-							case(RTSP_REQ_OPTIONS):
-								ret = rtsp_on_req_OPTIONS(server, rtsp_req_OPTIONS_cb);
-								break;
-							case(RTSP_REQ_DESCRIBE):
-								ret = rtsp_on_req_DESCRIBE(server, rtsp_req_DESCRIBE_cb);
-								break;
-							case(RTSP_REQ_GET_PARAMETER):
-								ret = rtsp_on_req_GET_PARAMETER(server, rtsp_req_GET_PARAMETER_cb);
-								break;
-							case(RTSP_REQ_SETUP):
-								ret = rtsp_on_req_SETUP(server, rtsp_req_SETUP_cb);
-								break;
-							case(RTSP_REQ_PLAY):
-								ret = rtsp_on_req_PLAY(server, rtsp_req_PLAY_cb);
-								break;
-							case(RTSP_REQ_TEARDOWN):
-								ret = rtsp_on_req_TEARDOWN(server, rtsp_req_TEARDOWN_cb);
-								break;
-							case(RTSP_REQ_PAUSE):
-								ret = rtsp_on_req_PAUSE(server, rtsp_req_PAUSE_cb);
-								break;
-							default:
-								ret = rtsp_on_req_UNDEFINED(server, rtsp_req_UNDEFINED_cb);
-								break;
-						}
-						if(ret < 0)
-						{
-								RTSP_ERROR("\n\rrtsp send response failed - err code:%d", ret);
-								goto out;
-						}
+						//if(rtsp_parse_request(&server->message, request, ret) == -EAGAIN)
+                                                //  continue;
+                                                if(rtsp_parse_request(&server->message, request, ret) < 0)
+                                                    goto out;
+                                                switch(server->message.method)
+                                                {
+                                                        case(RTSP_REQ_OPTIONS):
+                                                                ret = rtsp_on_req_OPTIONS(server, rtsp_req_OPTIONS_cb);
+                                                                break;
+                                                        case(RTSP_REQ_DESCRIBE):
+                                                                ret = rtsp_on_req_DESCRIBE(server, rtsp_req_DESCRIBE_cb);
+                                                                break;
+                                                        case(RTSP_REQ_GET_PARAMETER):
+                                                                ret = rtsp_on_req_GET_PARAMETER(server, rtsp_req_GET_PARAMETER_cb);
+                                                                break;
+                                                        case(RTSP_REQ_SETUP):
+                                                                ret = rtsp_on_req_SETUP(server, rtsp_req_SETUP_cb);
+                                                                break;
+                                                        case(RTSP_REQ_PLAY):
+                                                                ret = rtsp_on_req_PLAY(server, rtsp_req_PLAY_cb);
+                                                                break;
+                                                        case(RTSP_REQ_TEARDOWN):
+                                                                ret = rtsp_on_req_TEARDOWN(server, rtsp_req_TEARDOWN_cb);
+                                                                break;
+                                                        case(RTSP_REQ_PAUSE):
+                                                                ret = rtsp_on_req_PAUSE(server, rtsp_req_PAUSE_cb);
+                                                                break;
+                                                        default:
+                                                                ret = rtsp_on_req_UNDEFINED(server, rtsp_req_UNDEFINED_cb);
+                                                                break;
+                                                }
+                                                if(ret < 0)
+                                                {
+                                                                RTSP_ERROR("\n\rrtsp send response failed - err code:%d", ret);
+                                                                goto out;
+                                                }
 					}
 					if(rtsp_check_wifi_connectivity(WLAN0_NAME, &mode) < 0)
 						goto out;
 				}
 out:			
-				close(server->client_socket);	
+				close(server->client_socket);
+                                rtsp_sm_session_refresh(&server->server_media);
 				server->state_now = RTSP_INIT;				
 			}
 			
@@ -1233,13 +1398,14 @@ out:
 				RTSP_WARN("\n\rRTSP server restart in %ds...", rtsp_launch_timeout/1000);
 				goto restart;
 			}
-			//check ret value if see if goto exit1
-			
+			rtw_msleep_os(1000);
 		}
 exit1:
 		rtsp_server_stop(server);
 		close(server->server_socket);
-exit:
+                free(request);
+                RTSP_WARN("rtsp server stop...");
+exit:                
 		vTaskDelete(NULL);
 }
 
@@ -1267,12 +1433,12 @@ int rtsp_server_launch(struct rtsp_server *server)
 		}
 		//start rtsp server task
 		rtsp_server_set_launch_handle(server, &rtsp_server_service);
-		if(xTaskCreate(*server->launch_handle, ((const signed char*)"rtsp_s_service"), 2048, (void *)server, RTSP_SERVICE_PRIORITY, server->rtsp_task_id) != pdPASS)
+		if(xTaskCreate(*server->launch_handle, ((const signed char*)"rtsp_s_service"), 1024, (void *)server, RTSP_SERVICE_PRIORITY, server->rtsp_task_id) != pdPASS)
 		{
 			RTSP_ERROR("\n\rrtsp server service: Create Task Error\n");
 			goto error;
 		}
-		server->is_launched = 1;
+		
 		return 0;
 error:
 		server->rtsp_task_id = NULL;
@@ -1323,3 +1489,4 @@ _WEAK int rtsp_req_UNDEFINED_cb(void *ext_adapter)
 {
     return 0;
 }
+

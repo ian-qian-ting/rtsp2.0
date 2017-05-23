@@ -2,6 +2,7 @@
 #define _RTSP_SERVER_H_
 
 /*****************************************************INCLUDE**************************************************/
+#include "task.h"
 #include "rtp_common.h"
 #include "rtsp_common.h"
 #include "rtp_sink.h"
@@ -16,7 +17,7 @@
 
 inline int is_line_end(u8 *x)
 {
-    return (*x=='\r' || *x=='\0');
+    return (*x=='\n' || *x=='\0');
 }
 
 #define RTSP_PORT_DEF 554
@@ -68,8 +69,8 @@ typedef struct _rtsp_server_media_session{
 	int my_sdp_max_len;
 	int my_sdp_content_len;
 	int max_subsession_nb;
-	u32 subsession_cnt;
-	u32 reference_cnt;
+	ATOMIC_T subsession_cnt;
+	ATOMIC_T reference_cnt;
 	struct rtsp_session_info session_info;
 	//u32 time_stamp; // "Timestamp:[digit][.delay]"	
 }rtsp_sm_session, *p_rtsp_sm_session;

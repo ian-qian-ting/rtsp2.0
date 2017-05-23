@@ -47,9 +47,12 @@
 #define RTP_PT_DYN_BASE         96
 #define RTP_PT_UNKNOWN          255
 
-struct avcodec_handle_opts
+struct avcodec_handle_ops
 {
-	
+    int (*packet_extra_init)(void *ctx);
+    void (*packet_extra_deinit)(void *ctx);
+    int (*packet_send)(void *ctx);
+    int (*packet_recv)(void *ctx);
 };
 
 #endif

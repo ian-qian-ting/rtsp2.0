@@ -1,7 +1,7 @@
 #ifndef _SDP_H_
 #define _SDP_H_
 
-#include "avcodec.h"
+#include "rtp_avcodec/avcodec.h"
 
 #define CRLF "\r\n"
 #define IS_LINE_END(x) (return *(x)=='\r' || *(x)=='\0')

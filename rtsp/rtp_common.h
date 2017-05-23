@@ -24,6 +24,13 @@
 #define RTP_CLIENT_PORT_BASE 51020
 #define RTP_CLIENT_PORT_RANGE 1000
 
+/*define rtp packet status*/
+#define RTP_PCKT_IDLE           0x00 
+#define RTP_PCKT_READY          0x01
+#define RTP_PCKT_PROCESS        0x02
+#define RTP_PCKT_REF            0x40
+#define RTP_PCKT_INT            0x80
+
 /**************************************************STURCTURES**************************************************/
 
 /*
@@ -84,10 +91,9 @@ struct rtp_packet
 	void *extra; //pointer to media type specific structure	
 	int index; //internal buffer index if we get frame by ref instead of by copy
 	u8 *data; //pointer to sink data by ref
-	_sema sema_ref;
-	u8 *buf; //pointer to dynamic allocated buffer
-	int buf_len;
 	int len; //actual data len;
+	_mutex lock;
+        u8 status;
 };
 
 typedef struct _rtp_trans_stats{
@@ -114,4 +120,6 @@ typedef struct _rtp_recv_stats{
 
 /**************************************************DECLARATIONS************************************************/
 
+void rtp_fill_header(rtp_hdr_t *rtphdr, int version, int padding, int extension, int cc, int marker, int pt, u16 seq, u32 ts, u32 ssrc);
+int rtp_parse_header(u8 *src, rtp_hdr_t *rtphdr, int is_nbo);
 #endif

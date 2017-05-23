@@ -29,6 +29,7 @@
 /* rtsp supported response status list */
 #define RTSP_RES_OK "RTSP/1.0 200 OK"
 #define RTSP_RES_BAD "RTSP/1.0 400 Bad Request"
+#define RTSP_RES_SNF "RTSP/1.0 454 Session Not Found"
 
 /* rtsp header field particulars */
 
@@ -37,12 +38,12 @@
 #define STR_UNICAST		"unicast"
 #define STR_MULTICAST	"multicast"
 
-#define TRANS_PROTO_UNKNOWN	0x00000000
-#define TRANS_PROTO_RTP	0x00000001
+#define TRANS_PROTO_UNKNOWN	0x00
+#define TRANS_PROTO_RTP	0x01
 
-#define TRANS_LOWER_PROTO_UNKNOWN	0x10000000
-#define TRANS_LOWER_PROTO_UDP	0x10000001
-#define TRANS_LOWER_PROTO_TCP	0x10000002
+#define TRANS_LOWER_PROTO_UNKNOWN	0x10
+#define TRANS_LOWER_PROTO_UDP	0x11
+#define TRANS_LOWER_PROTO_TCP	0x12
 
 
 //accept&levels
@@ -95,7 +96,5 @@ struct rtsp_message{
 };
 
 /************************************************DECLARATIONS************************************************/
-
-extern int rtsp_parse_request(struct rtsp_message *msg, u8 *request, int size);
 
 #endif

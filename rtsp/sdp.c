@@ -1,6 +1,6 @@
 #include "platform/platform_stdlib.h"
 #include "basic_types.h"
-#include "rtsp/sdp.h"
+#include "sdp.h"
 
 
 void sdp_strcat(unsigned char *buf1, int size, unsigned char *buf2)

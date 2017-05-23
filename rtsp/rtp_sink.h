@@ -1,7 +1,8 @@
 #ifndef _RTP_SINK_H_
 #define _RTP_SINK_H_
 
-#include "avcodec.h"
+#include "rtp_avcodec/avcodec.h"
+#include "rtp_avcodec/avcodec_util.h"
 #include "rtp_common.h"
 
 #define SINK_FLAG_FRAME_BY_REF		0x01
@@ -10,6 +11,8 @@
 
 //structure for sending data
 typedef struct _rtp_sink{
+        int rtp_sock;
+        int rtcp_sock;
 	u32 ssrc;
 	u32 base_ts; //base timestamp
 	u32 now_ts;
@@ -27,19 +30,28 @@ typedef struct _rtp_sink{
 	u32 total_octet_cnt;
 	u8 sink_flag;
 	struct rtp_packet *packet;
-	struct avcodec_handle_opts *media_hdl_opts;	
+	struct avcodec_handle_ops *media_hdl_ops;	
 	rtp_trans_stats *stats; 
 	//rtcp_instance *rtcp_inst;
 }rtp_sink_t;
 
 
-rtp_sink_t *rtp_sink_create_by_codec_id(u8 codec_id);
-rtp_sink_t *rtp_sink_create_by_codec_name(const char* name);
+int rtp_sink_init_by_codec_id(rtp_sink_t *sink, u8 codec_id);
+int rtp_sink_init_by_codec_name(rtp_sink_t *sink, const char* name);
 int rtp_sink_is_frame_by_ref(rtp_sink_t *sink);
 int rtp_sink_is_frame_by_buf(rtp_sink_t *sink);
+void rtp_sink_set_frame_by_none(rtp_sink_t *sink);
 void rtp_sink_set_frame_by_ref(rtp_sink_t *sink);
 void rtp_sink_set_frame_by_buf(rtp_sink_t *sink);
-int rtp_sink_packet_init(rtp_sink_t *sink, int buf_size);
+int rtp_sink_packet_create(rtp_sink_t *sink);        
+int rtp_sink_packet_init(rtp_sink_t *sink);
+void rtp_sink_packet_free(rtp_sink_t *sink);
+void rtp_sink_ind_frame_sent(rtp_sink_t *sink);
+int rtp_sink_wait_frame_sent(rtp_sink_t *sink);
+void rtp_sink_ind_frame_ready(rtp_sink_t *sink);
+int rtp_sink_wait_frame_ready(rtp_sink_t *sink);
+void rtp_sink_ind_frame_process(rtp_sink_t *sink);
+int rtp_sink_get_frame(rtp_sink_t *sink, int index, u8 *src, int len);
 int rtp_sink_stats_init(rtp_sink_t *sink);
 int rtp_sink_rtcp_init(rtp_sink_t *sink);
 
